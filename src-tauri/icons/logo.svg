@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:rgba(255,255,255,0.2)"/>
+      <stop offset="50%" style="stop-color:rgba(255,255,255,0)"/>
+    </linearGradient>
+    <filter id="innerShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="blur"/>
+      <feOffset in="blur" dx="0" dy="4" result="offsetBlur"/>
+      <feComposite in="SourceGraphic" in2="offsetBlur" operator="over"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="412" rx="185" fill="url(#shine)"/>
+  <g transform="translate(512, 512)" filter="url(#innerShadow)">
+    <circle cx="-120" cy="-100" r="52" fill="#ffffff"/>
+    <circle cx="-120" cy="100" r="52" fill="#ffffff"/>
+    <circle cx="120" cy="0" r="68" fill="#ffffff"/>
+    <path d="M-68 -100 L52 0" stroke="#ffffff" stroke-width="36" fill="none" stroke-linecap="round"/>
+    <path d="M-68 100 L52 0" stroke="#ffffff" stroke-width="36" fill="none" stroke-linecap="round"/>
+  </g>
+</svg>

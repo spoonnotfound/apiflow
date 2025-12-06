@@ -32,10 +32,12 @@ mod tests;
 use crate::helpers::{
     build_upstream_url, extract_proxy_key, format_headers, normalize_base_path, strip_base_path, truncate_body,
 };
-use crate::logging::MAX_LOGS;
+use crate::logging::{finalize_inflight, MAX_LOGS};
 use crate::network::NetworkInfo;
 use crate::persistence::{load_config, save_config};
 pub use tray::update_tray_status;
+
+const MAX_FALLBACK_RETRIES: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../src/types/generated/ProxyConfig.ts")]
@@ -44,6 +46,8 @@ pub struct ProxyConfig {
     pub listen_port: u16,
     pub global_key: Option<String>,
     pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub fallback_retries: u32,
     pub services: Vec<ServiceConfig>,
 }
 
@@ -65,6 +69,7 @@ pub struct ProxyLogEntry {
     #[ts(type = "number")]
     pub duration_ms: u128,
     pub error: Option<String>,
+    pub retry_action: Option<String>,
     pub request_headers: Option<String>,
     pub request_body: Option<String>,
     pub response_headers: Option<String>,
@@ -212,11 +217,13 @@ async fn start_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> 
     }
 
     let proxy_url = config.proxy_url.clone().filter(|s| !s.trim().is_empty());
+    let fallback_retries = config.fallback_retries.min(MAX_FALLBACK_RETRIES);
 
     let config = ProxyConfig {
         listen_port: config.listen_port,
         global_key: config.global_key.clone().filter(|s| !s.trim().is_empty()),
         proxy_url: proxy_url.clone(),
+        fallback_retries,
         services,
     };
 
@@ -240,6 +247,7 @@ async fn start_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> 
         if let Some(existing) = guard.remove(&config.listen_port) {
             let _ = existing.shutdown.send(());
             let _ = existing.join.await;
+            finalize_inflight(state.logs.clone(), Some(config.listen_port)).await;
         }
     }
 
@@ -294,6 +302,7 @@ async fn stop_proxy(
         if let Some(running) = guard.remove(&port) {
             let _ = running.shutdown.send(());
             let _ = running.join.await;
+            finalize_inflight(state.logs.clone(), Some(port)).await;
         }
     } else {
         let servers: Vec<_> = guard.drain().collect();
@@ -301,6 +310,7 @@ async fn stop_proxy(
             let _ = running.shutdown.send(());
             let _ = running.join.await;
         }
+        finalize_inflight(state.logs.clone(), None).await;
     };
     Ok(())
 }
@@ -358,11 +368,19 @@ async fn get_network_info() -> Result<NetworkInfo, String> {
 
 #[tauri::command]
 async fn load_settings() -> Result<Option<ProxyConfig>, String> {
-    load_config()
+    load_config().map(|cfg| {
+        cfg.map(|mut c| {
+            c.fallback_retries = c.fallback_retries.min(MAX_FALLBACK_RETRIES);
+            c
+        })
+    })
 }
 
 #[tauri::command]
 async fn save_settings(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> Result<(), String> {
+    let mut config = config;
+    config.fallback_retries = config.fallback_retries.min(MAX_FALLBACK_RETRIES);
+
     save_config(&config)?;
     
     let guard = state.inner.lock().await;
@@ -444,6 +462,7 @@ async fn reload_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) ->
         listen_port: config.listen_port,
         global_key: config.global_key.clone().filter(|s| !s.trim().is_empty()),
         proxy_url: proxy_url.clone(),
+        fallback_retries: config.fallback_retries.min(MAX_FALLBACK_RETRIES),
         services,
     };
 
@@ -492,6 +511,7 @@ async fn proxy_handler(
             upstream_label: None,
             service_name: None,
             base_path: None,
+            retry_action: None,
             request_headers: None,
             request_body: None,
             response_headers: None,
@@ -509,20 +529,34 @@ async fn proxy_handler(
         None => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
 
+    let RouteInfo {
+        service_name,
+        service_base,
+        upstreams,
+    } = route;
+
     let mut entry = ProxyLogEntry {
         id: request_id.to_string(),
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         method: parts.method.to_string(),
         path: path.to_string(),
-        upstream_url: route.upstream_url.clone(),
+        upstream_url: upstreams
+            .first()
+            .map(|u| u.upstream_url.clone())
+            .unwrap_or_default(),
         status: None,
         duration_ms: 0,
         error: None,
         listen_port: config.listen_port,
-        route_key: route.upstream_label.clone(),
-        upstream_label: route.upstream_label.clone(),
-        service_name: Some(route.service_name),
-        base_path: Some(route.service_base),
+        route_key: upstreams
+            .first()
+            .and_then(|u| u.upstream_label.clone()),
+        upstream_label: upstreams
+            .first()
+            .and_then(|u| u.upstream_label.clone()),
+        service_name: Some(service_name),
+        base_path: Some(service_base),
+        retry_action: None,
         request_headers: None, // 稍后在 prepare_upstream_request 后设置
         request_body: None,
         response_headers: None,
@@ -544,57 +578,139 @@ async fn proxy_handler(
 
     entry.request_body = truncate_body(&body_bytes, 8000);
 
-    // 3. Prepare Request
-    let client_guard = shared.client.read().await;
-    let (upstream_req, upstream_headers_str) = prepare_upstream_request(
-        &client_guard,
-        &parts.method,
-        &route.upstream_url,
-        &parts.headers,
-        route.api_key.as_deref(),
-        body_bytes,
-    );
-    drop(client_guard); // Release lock before await
+    let allowed_retries = config.fallback_retries.min(MAX_FALLBACK_RETRIES);
+    let retries_per_upstream = allowed_retries.saturating_sub(1); // 0->no retry,1->no retry but allow fallback,2->retry once then fallback
+    let allow_fallback = allowed_retries >= 1;
+    let mut attempt_errors: Vec<String> = Vec::new();
 
-    // 记录发给上游的请求头（而不是客户端的原始请求头）
-    entry.request_headers = Some(upstream_headers_str);
+    for (up_idx, upstream) in upstreams.iter().enumerate() {
+        for attempt in 0..=retries_per_upstream {
+            let attempt_started = Instant::now();
 
-    // 将“处理中”日志先写入队列，便于前端立即展示
-    logging::upsert_log(shared.logs.clone(), entry.clone()).await;
+            entry.upstream_url = upstream.upstream_url.clone();
+            entry.route_key = upstream.upstream_label.clone();
+            entry.upstream_label = upstream.upstream_label.clone();
 
-    // 4. Execute & Handle Response
-    let upstream_resp = upstream_req.send().await;
+            // 3. Prepare Request for this attempt
+            let client_guard = shared.client.read().await;
+            let (upstream_req, upstream_headers_str) = prepare_upstream_request(
+                &client_guard,
+                &parts.method,
+                &upstream.upstream_url,
+                &parts.headers,
+                upstream.api_key.as_deref(),
+                body_bytes.clone(),
+            );
+            drop(client_guard); // Release lock before await
 
-    match upstream_resp {
-        Ok(resp) => {
-            handle_upstream_response(
-                resp,
-                entry,
-                started_at,
-                shared.logs.clone(),
-                shared.stats.clone(),
-                route.upstream_id,
-                route.upstream_label,
-            )
-            .await
-        }
-        Err(err) => {
-            entry.error = Some(format!("上游请求失败: {err}"));
-            entry.duration_ms = started_at.elapsed().as_millis();
-            logging::update_stats(
-                shared.stats.clone(),
-                &route.upstream_id,
-                route.upstream_label,
-                entry.duration_ms as u64,
-                false,
-            ).await;
-            logging::upsert_log(shared.logs.clone(), entry).await;
-            Ok(error_response(
-                StatusCode::BAD_GATEWAY,
-                "上游请求失败，请检查配置",
-            ))
+            // 记录发给上游的请求头（而不是客户端的原始请求头）
+            entry.request_headers = Some(upstream_headers_str);
+
+            // 将“处理中”日志写入队列，便于前端立即展示/更新当前尝试的上游
+            logging::upsert_log(shared.logs.clone(), entry.clone()).await;
+
+            // 4. Execute & Handle Response
+            let upstream_resp = upstream_req.send().await;
+
+            match upstream_resp {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if should_retry_status(status) && attempt < retries_per_upstream {
+                        let mut failed_entry = entry.clone();
+                        failed_entry.id = format!("{}-{}-{}", entry.id, up_idx + 1, attempt + 1);
+                        failed_entry.status = Some(status.as_u16());
+                        failed_entry.duration_ms = attempt_started.elapsed().as_millis();
+                        failed_entry.error = Some(format!("上游返回 {status}，已自动重试"));
+                        failed_entry.retry_action = Some("retry".into());
+                        logging::upsert_log(shared.logs.clone(), failed_entry).await;
+                        logging::update_stats(
+                            shared.stats.clone(),
+                            &upstream.upstream_id,
+                            upstream.upstream_label.clone(),
+                            attempt_started.elapsed().as_millis() as u64,
+                            false,
+                        )
+                        .await;
+                        attempt_errors.push(format!("上游返回 {status}"));
+                        continue;
+                    }
+
+                    if up_idx > 0 {
+                        entry.retry_action = Some("fallback".into());
+                    } else if attempt > 0 {
+                        entry.retry_action = Some("retry".into());
+                    }
+
+                    return handle_upstream_response(
+                        resp,
+                        entry,
+                        started_at,
+                        attempt_started,
+                        shared.logs.clone(),
+                        shared.stats.clone(),
+                        upstream.upstream_id.clone(),
+                        upstream.upstream_label.clone(),
+                    )
+                    .await;
+                }
+                Err(err) => {
+                logging::update_stats(
+                    shared.stats.clone(),
+                    &upstream.upstream_id,
+                    upstream.upstream_label.clone(),
+                    attempt_started.elapsed().as_millis() as u64,
+                    false,
+                )
+                .await;
+
+                    let mut failed_entry = entry.clone();
+                    failed_entry.id = format!("{}-{}-{}", entry.id, up_idx + 1, attempt + 1);
+                    failed_entry.status = Some(StatusCode::BAD_GATEWAY.as_u16());
+                    failed_entry.duration_ms = attempt_started.elapsed().as_millis();
+                    let has_retry_left = attempt < retries_per_upstream;
+                    let has_next_upstream = allow_fallback && up_idx + 1 < upstreams.len();
+                    failed_entry.error = Some(match () {
+                        _ if has_retry_left => format!("{}，已自动重试", err),
+                        _ if has_next_upstream => format!("{}，已自动切换上游", err),
+                        _ => err.to_string(),
+                    });
+                    failed_entry.retry_action = if has_retry_left {
+                        Some("retry".into())
+                    } else if has_next_upstream {
+                        Some("fallback".into())
+                    } else {
+                        None
+                    };
+                logging::upsert_log(shared.logs.clone(), failed_entry).await;
+                attempt_errors.push(err.to_string());
+
+                if has_retry_left {
+                    continue;
+                }
+
+                // Exhausted retries for this upstream; try next if available
+                if allow_fallback && up_idx + 1 < upstreams.len() {
+                    break; // move to next upstream
+                }
+
+                    // No upstreams left
+                    entry.error = Some(format!(
+                        "上游请求失败: {}",
+                        attempt_errors.join("; ")
+                    ));
+                    entry.status = Some(StatusCode::BAD_GATEWAY.as_u16());
+                    entry.duration_ms = started_at.elapsed().as_millis();
+                    logging::upsert_log(shared.logs.clone(), entry).await;
+                    return Ok(error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "上游请求失败，请检查配置",
+                    ));
+                }
+            }
         }
     }
+
+    Err(StatusCode::BAD_GATEWAY)
 }
 
 // --- Helper Functions ---
@@ -612,26 +728,54 @@ fn check_auth(config: &ProxyConfig, parts: &http::request::Parts) -> Result<(), 
 struct RouteInfo {
     service_name: String,
     service_base: String,
+    upstreams: Vec<ResolvedUpstream>,
+}
+
+#[derive(Clone)]
+struct ResolvedUpstream {
     upstream_url: String,
     upstream_id: String,
     upstream_label: Option<String>,
     api_key: Option<String>,
 }
 
+fn enabled_upstreams_sorted<'a>(upstreams: &'a [UpstreamEntry]) -> Vec<&'a UpstreamEntry> {
+    let mut enabled: Vec<&UpstreamEntry> = upstreams.iter().filter(|u| u.enabled).collect();
+    enabled.sort_by_key(|u| u.priority);
+    enabled
+}
+
 fn resolve_route(config: &ProxyConfig, path: &str) -> Option<RouteInfo> {
     let service = select_service(config, path)?;
     let trimmed_path = strip_base_path(path, &service.base_path);
-    let upstream_entry = select_upstream(&service.upstreams)?;
-    let upstream_url = build_upstream_url(&upstream_entry.upstream_base, trimmed_path);
+
+    let enabled_upstreams = enabled_upstreams_sorted(&service.upstreams);
+
+    if enabled_upstreams.is_empty() {
+        return None;
+    }
+
+    let upstreams: Vec<ResolvedUpstream> = enabled_upstreams
+        .into_iter()
+        .map(|u| ResolvedUpstream {
+            upstream_url: build_upstream_url(&u.upstream_base, &trimmed_path),
+            upstream_id: u.id.clone(),
+            upstream_label: u.label.clone(),
+            api_key: u.api_key.clone(),
+        })
+        .collect();
 
     Some(RouteInfo {
         service_name: service.name.clone(),
         service_base: service.base_path.clone(),
-        upstream_url,
-        upstream_id: upstream_entry.id.clone(),
-        upstream_label: upstream_entry.label.clone(),
-        api_key: upstream_entry.api_key.clone(),
+        upstreams,
     })
+}
+
+fn should_retry_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::REQUEST_TIMEOUT
 }
 
 /// 返回 (RequestBuilder, 上游请求头字符串用于日志)
@@ -708,7 +852,8 @@ fn prepare_upstream_request(
 async fn handle_upstream_response(
     resp: reqwest::Response,
     mut entry: ProxyLogEntry,
-    started_at: Instant,
+    request_started: Instant,
+    attempt_started: Instant,
     logs: Arc<Mutex<VecDeque<ProxyLogEntry>>>,
     stats: Arc<Mutex<HashMap<String, UpstreamStats>>>,
     upstream_id: String,
@@ -735,7 +880,8 @@ async fn handle_upstream_response(
         handle_streaming_body(
             resp,
             entry,
-            started_at,
+            request_started,
+            attempt_started,
             logs,
             stats,
             upstream_id,
@@ -747,7 +893,8 @@ async fn handle_upstream_response(
         handle_regular_body(
             resp,
             entry,
-            started_at,
+            request_started,
+            attempt_started,
             logs,
             stats,
             upstream_id,
@@ -762,7 +909,8 @@ async fn handle_upstream_response(
 fn handle_streaming_body(
     resp: reqwest::Response,
     entry: ProxyLogEntry,
-    started_at: Instant,
+    request_started: Instant,
+    attempt_started: Instant,
     logs: Arc<Mutex<VecDeque<ProxyLogEntry>>>,
     stats: Arc<Mutex<HashMap<String, UpstreamStats>>>,
     upstream_id: String,
@@ -801,14 +949,14 @@ fn handle_streaming_body(
 
         let mut final_entry = entry_clone;
         final_entry.response_body = response_body;
-        final_entry.duration_ms = started_at.elapsed().as_millis();
+        final_entry.duration_ms = request_started.elapsed().as_millis();
 
         logging::upsert_log(logs, final_entry).await;
         logging::update_stats(
             stats,
             &upstream_id,
             upstream_label,
-            started_at.elapsed().as_millis() as u64,
+            attempt_started.elapsed().as_millis() as u64,
             !status.is_client_error() && !status.is_server_error(),
         )
         .await;
@@ -822,7 +970,8 @@ fn handle_streaming_body(
 async fn handle_regular_body(
     resp: reqwest::Response,
     mut entry: ProxyLogEntry,
-    started_at: Instant,
+    request_started: Instant,
+    attempt_started: Instant,
     logs: Arc<Mutex<VecDeque<ProxyLogEntry>>>,
     stats: Arc<Mutex<HashMap<String, UpstreamStats>>>,
     upstream_id: String,
@@ -834,13 +983,13 @@ async fn handle_regular_body(
         Ok(bytes) => bytes,
         Err(err) => {
             entry.error = Some(format!("读取上游响应失败: {err}"));
-            entry.duration_ms = started_at.elapsed().as_millis();
+            entry.duration_ms = request_started.elapsed().as_millis();
             logging::upsert_log(logs, entry).await;
             return Ok(error_response(StatusCode::BAD_GATEWAY, "上游响应读取失败"));
         }
     };
 
-    entry.duration_ms = started_at.elapsed().as_millis();
+    entry.duration_ms = request_started.elapsed().as_millis();
     entry.response_body = truncate_body(&body_bytes, 8000);
 
     if status.is_client_error() || status.is_server_error() {
@@ -853,7 +1002,7 @@ async fn handle_regular_body(
         stats,
         &upstream_id,
         upstream_label,
-        entry.duration_ms as u64,
+        attempt_started.elapsed().as_millis() as u64,
         !status.is_client_error() && !status.is_server_error(),
     )
     .await;
@@ -881,13 +1030,14 @@ fn build_response(
     builder.body(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+#[cfg(test)]
 fn select_upstream<'a>(upstreams: &'a [UpstreamEntry]) -> Option<&'a UpstreamEntry> {
-    let enabled: Vec<&UpstreamEntry> = upstreams.iter().filter(|u| u.enabled).collect();
+    let enabled = enabled_upstreams_sorted(upstreams);
     if enabled.is_empty() {
         return None;
     }
 
-    enabled.into_iter().min_by_key(|u| u.priority)
+    enabled.into_iter().next()
 }
 
 fn select_service<'a>(config: &'a ProxyConfig, path: &str) -> Option<&'a ServiceConfig> {

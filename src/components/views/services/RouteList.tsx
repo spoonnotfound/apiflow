@@ -31,7 +31,7 @@ export function RouteList({
   openUpstreamModal,
 }: RouteListProps) {
   return (
-    <section className="space-y-4">
+    <section className="space-y-4 min-h-0">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-medium text-slate-900 dark:text-slate-100">提供商路由</h3>
@@ -45,7 +45,7 @@ export function RouteList({
         </Button>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-3 max-h-[420px] min-h-[240px] overflow-y-auto pr-1 scrollbar-thin">
         {links.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/20 py-12 text-center">
             <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800">
@@ -67,13 +67,25 @@ export function RouteList({
                 <div
                   key={link.id}
                   draggable
-                  onDragStart={() => setDragIdx(idx)}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => {
-                    if (dragIdx !== null) {
-                      onLinkDrag(dragIdx, idx);
-                      setDragIdx(null);
+                  data-index={idx}
+                  onDragStart={(e) => {
+                    setDragIdx(idx);
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", String(idx));
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const from = e.dataTransfer.getData("text/plain");
+                    const fromIdx = from ? Number(from) : dragIdx;
+                    const toIdx = Number(e.currentTarget.getAttribute("data-index"));
+                    if (fromIdx !== null && !Number.isNaN(fromIdx)) {
+                      onLinkDrag(fromIdx, Number.isNaN(toIdx) ? idx : toIdx);
                     }
+                    setDragIdx(null);
                   }}
                   onDragEnd={() => setDragIdx(null)}
                   className={`group flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-2 transition-all hover:shadow-md ${

@@ -7,6 +7,7 @@ fn create_test_config() -> ProxyConfig {
         listen_port: 8080,
         global_key: None,
         proxy_url: None,
+        fallback_retries: 0,
         services: vec![
             ServiceConfig {
                 id: "svc1".into(),
@@ -69,6 +70,7 @@ fn select_service_prefers_longest_prefix() {
         listen_port: 1,
         global_key: None,
         proxy_url: None,
+        fallback_retries: 0,
         services,
     };
 
@@ -162,7 +164,54 @@ fn test_resolve_route_success() {
     assert!(route.is_some());
     let r = route.unwrap();
     assert_eq!(r.service_name, "Test Service");
-    assert_eq!(r.upstream_url, "http://localhost:9999/users/1");
+    assert_eq!(r.upstreams.len(), 1);
+    assert_eq!(r.upstreams[0].upstream_url, "http://localhost:9999/users/1");
+}
+
+#[test]
+fn resolve_route_orders_upstreams_for_fallback() {
+    let config = ProxyConfig {
+        listen_port: 8080,
+        global_key: None,
+        proxy_url: None,
+        fallback_retries: 2,
+        services: vec![ServiceConfig {
+            id: "svc1".into(),
+            name: "svc".into(),
+            base_path: "/".into(),
+            enabled: true,
+            upstreams: vec![
+                UpstreamEntry {
+                    id: "u1".into(),
+                    label: Some("first".into()),
+                    upstream_base: "http://one".into(),
+                    api_key: None,
+                    priority: 10,
+                    enabled: true,
+                },
+                UpstreamEntry {
+                    id: "u2".into(),
+                    label: Some("second".into()),
+                    upstream_base: "http://two".into(),
+                    api_key: None,
+                    priority: 1,
+                    enabled: true,
+                },
+                UpstreamEntry {
+                    id: "u3".into(),
+                    label: Some("disabled".into()),
+                    upstream_base: "http://disabled".into(),
+                    api_key: None,
+                    priority: 0,
+                    enabled: false,
+                },
+            ],
+        }],
+    };
+
+    let route = resolve_route(&config, "/any").expect("route");
+    let ids: Vec<_> = route.upstreams.iter().map(|u| u.upstream_id.as_str()).collect();
+    assert_eq!(ids, vec!["u2", "u1"]);
 }
 
 #[test]

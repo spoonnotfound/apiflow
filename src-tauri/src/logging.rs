@@ -43,3 +43,24 @@ pub async fn update_stats(
         entry.upstream_label = upstream_label;
     }
 }
+
+/// Mark in-flight log entries (status == None) as terminated when the proxy stops.
+pub async fn finalize_inflight(
+    logs: Arc<Mutex<VecDeque<ProxyLogEntry>>>,
+    listen_port: Option<u16>,
+) {
+    let mut guard = logs.lock().await;
+    for entry in guard.iter_mut() {
+        let port_matches = listen_port
+            .map(|p| p == entry.listen_port)
+            .unwrap_or(true);
+
+        if port_matches && entry.status.is_none() {
+            entry.status = Some(499); // Client Closed Request semantics
+            entry.error = Some("代理已停止，处理中请求已终止".to_string());
+            if entry.duration_ms == 0 {
+                entry.duration_ms = 0;
+            }
+        }
+    }
+}

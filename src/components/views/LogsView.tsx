@@ -126,8 +126,8 @@ const LogItem = memo(function LogItem({
         onClick={onToggle}
       >
         <Badge
-          variant={getMethodVariant(log.method) as "default" | "secondary" | "destructive" | "outline"}
-          className="mt-0.5 font-mono uppercase px-2 py-0.5 h-6"
+            variant={getMethodVariant(log.method) as "default" | "secondary" | "destructive" | "outline"}
+            className="mt-0.5 font-mono uppercase px-2 py-0.5 h-6"
         >
           {log.method}
         </Badge>
@@ -181,27 +181,45 @@ const LogItem = memo(function LogItem({
         </div>
 
         <div className="flex flex-col items-end gap-2">
-          <Badge
-              variant={
-              log.status && log.status < 400
-                  ? "outline"
-                  : "destructive"
-              }
-              className={`font-mono ${log.status && log.status < 400 ? "text-emerald-600 border-emerald-200 dark:text-emerald-400 dark:border-emerald-900" : ""}`}
-          >
-              {log.status ?? "处理中"}
-          </Badge>
+          <div className="flex items-center gap-2">
+            {log.retryAction && (
+              <Badge
+                variant="outline"
+                className="text-amber-700 border-amber-200 dark:text-amber-200 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/30 font-normal"
+              >
+                {log.retryAction === "fallback" ? "自动切换" : "自动重试"}
+              </Badge>
+            )}
+            <Badge
+                variant={
+                log.status == null
+                    ? "secondary"
+                    : log.status < 400
+                      ? "outline"
+                      : "destructive"
+                }
+                className={`font-mono ${
+                  log.status == null
+                    ? "text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700"
+                    : log.status < 400
+                      ? "text-emerald-600 border-emerald-200 dark:text-emerald-400 dark:border-emerald-900"
+                      : ""
+                }`}
+            >
+                {log.status ?? "处理中"}
+            </Badge>
+          </div>
 
           <div className={`text-slate-300 dark:text-slate-600 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}>
               <ChevronDown className="h-4 w-4" />
           </div>
         </div>
       </div>
-      {isExpanded && (
-        <div className="border-t dark:border-slate-800 bg-slate-50 dark:bg-slate-900/30 px-5 py-4 space-y-6 animate-in slide-in-from-top-2 duration-200">
-          {/* General Info */}
-          <div className="space-y-2">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">基本信息</h4>
+          {isExpanded && (
+            <div className="border-t dark:border-slate-800 bg-slate-50 dark:bg-slate-900/30 px-5 py-4 space-y-6 animate-in slide-in-from-top-2 duration-200">
+              {/* General Info */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">基本信息</h4>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-3 bg-white dark:bg-slate-950 rounded-lg border dark:border-slate-800">
               <div>
                 <span className="text-[10px] font-medium text-slate-400 uppercase block">请求方法</span>
@@ -209,7 +227,7 @@ const LogItem = memo(function LogItem({
               </div>
               <div>
                 <span className="text-[10px] font-medium text-slate-400 uppercase block">状态码</span>
-                <span className={`text-xs font-mono ${log.status && log.status < 400 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
+                <span className={`text-xs font-mono ${log.status == null ? 'text-slate-600 dark:text-slate-300' : log.status < 400 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
                   {log.status ?? '处理中'}
                 </span>
               </div>

@@ -33,6 +33,8 @@ export function SettingsView() {
     setGlobalKey,
     proxyUrl,
     setProxyUrl,
+    fallbackRetries,
+    setFallbackRetries,
     isRunning
   } = useProxyStore();
 
@@ -221,6 +223,58 @@ export function SettingsView() {
                             访问外部 API 时使用的代理。支持 HTTP, HTTPS, SOCKS5。留空则直连。
                         </p>
                     </div>
+                    </div>
+                </div>
+            </section>
+
+            {/* Fallback Section */}
+            <section className="space-y-4">
+                <div className="flex items-center gap-2 pb-2 border-b border-slate-100 dark:border-slate-800">
+                    <RefreshCw className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
+                    <h3 className="font-semibold text-slate-900 dark:text-slate-100">自动切换</h3>
+                </div>
+
+                <div className={`relative ${isRunning ? "opacity-60" : ""}`}>
+                    {isRunning && (
+                        <>
+                            <div className="pointer-events-auto absolute inset-0 z-10" />
+                            <div className="absolute right-3 top-3 z-20 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700 dark:bg-amber-900/60 dark:text-amber-200">
+                                <Lock className="h-3.5 w-3.5" />
+                                运行中已锁定
+                            </div>
+                        </>
+                    )}
+                    <div className="grid gap-6 p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950">
+                        <div className="space-y-3">
+                            <Label className="text-base">自动重试次数</Label>
+                            <div className="flex items-center gap-4">
+                                <Input
+                                    type="number"
+                                    min={0}
+                                    max={10}
+                                    value={fallbackRetries}
+                                    onChange={(e) => {
+                                        const val = Number(e.target.value);
+                                        if (Number.isNaN(val)) return;
+                                        setFallbackRetries(Math.max(0, Math.min(10, Math.floor(val))));
+                                    }}
+                                    onBlur={(e) => {
+                                        const val = Number(e.target.value);
+                                        if (Number.isNaN(val)) {
+                                            setFallbackRetries(0);
+                                        } else {
+                                            setFallbackRetries(Math.max(0, Math.min(10, Math.floor(val))));
+                                        }
+                                    }}
+                                    disabled={isRunning}
+                                    className="w-32 font-mono"
+                                />
+                                <span className="text-sm text-slate-500">0 表示关闭自动重试</span>
+                            </div>
+                            <p className="text-sm text-slate-500">
+                                0 表示关闭自动重试；大于 0 时单个上游会先重试（次数 = 设置值，含首次共 N 次），耗尽后再按优先级切换下一个上游。
+                            </p>
+                        </div>
                     </div>
                 </div>
             </section>

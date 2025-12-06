@@ -174,7 +174,7 @@ export function ServicesView({
           onDelete={() => handleDeleteService(selectedService?.id ?? "")}
         />
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-6 min-h-0">
           <div className="mx-auto max-w-3xl space-y-8">
             {/* Basic Info Section */}
             <section className="space-y-4">

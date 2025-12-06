@@ -74,6 +74,13 @@ export function Sidebar({
         ))}
       </div>
 
+      {isRunning && processingCount > 0 && (
+        <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-100 dark:ring-emerald-800">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          正在处理 {processingCount} 个请求
+        </div>
+      )}
+
       {/* Footer / Status */}
       <div className="shrink-0 p-4 border-t border-slate-100 dark:border-slate-900 bg-slate-50/50 dark:bg-slate-900/50">
         {/* Status Indicator */}
@@ -99,13 +106,6 @@ export function Sidebar({
                 {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
         </div>
-
-        {isRunning && processingCount > 0 && (
-          <div className="mb-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-100 dark:ring-emerald-800">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            正在处理 {processingCount} 个请求
-          </div>
-        )}
 
         {/* Control Button - 使用固定高度容器 */}
         <div className="h-10">

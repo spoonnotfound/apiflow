@@ -23,6 +23,8 @@ interface ProxyStoreContextType {
   setGlobalKey: (key: string) => void;
   proxyUrl: string;
   setProxyUrl: (url: string) => void;
+  fallbackRetries: number;
+  setFallbackRetries: (retries: number) => void;
 
   services: ServiceConfig[];
   setServices: React.Dispatch<React.SetStateAction<ServiceConfig[]>>;
@@ -63,6 +65,7 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
   const [listenPort, setListenPort] = useState(23333);
   const [globalKey, setGlobalKey] = useState("");
   const [proxyUrl, setProxyUrl] = useState("");
+  const [fallbackRetries, setFallbackRetries] = useState(1);
   
   const [services, setServices] = useState<ServiceConfig[]>([defaultService()]);
   const [upstreams, setUpstreams] = useState<UpstreamConfig[]>([]);
@@ -79,11 +82,67 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
   const autoReloadInFlight = useRef(false);
   const queuedAutoReload = useRef(false);
   const reloadGatewayRef = useRef<() => Promise<void>>(async () => {});
+  const autoSaveTimer = useRef<number | null>(null);
+
+  const buildConfigPayload = () => {
+    const payloadServices = services
+      .filter((s) => s.enabled)
+      .map((svc) => {
+        const serviceLinks = resequenceLinks(routes[svc.id] ?? []);
+        const upstreamEntries = serviceLinks
+          .filter((link) => link.enabled)
+          .map((link) => {
+            const upstream = upstreams.find((u) => u.id === link.upstreamId);
+            if (!upstream) return null;
+            return {
+              id: upstream.id,
+              label: upstream.label.trim() || null,
+              upstreamBase: upstream.upstreamBase.trim(),
+              apiKey: upstream.apiKey.trim() || null,
+              priority: link.priority,
+              enabled: upstream.enabled && link.enabled,
+            };
+          })
+          .filter((v) => v && v.upstreamBase) as {
+          id: string;
+          label: string | null;
+          upstreamBase: string;
+          apiKey: string | null;
+          priority: number;
+          enabled: boolean;
+        }[];
+
+        return {
+          id: svc.id,
+          name: svc.name.trim() || "未命名服务",
+          basePath: svc.basePath.trim() || "/",
+          enabled: svc.enabled,
+          upstreams: upstreamEntries,
+        };
+      })
+      .filter((svc) => (svc.upstreams?.length ?? 0) > 0);
+
+    if (payloadServices.length === 0) {
+      return null;
+    }
+
+    const cfg: PersistedConfig = {
+      listenPort,
+      globalKey: globalKey.trim() || null,
+      proxyUrl: proxyUrl.trim() || null,
+      fallbackRetries,
+      services: payloadServices,
+    };
+
+    return cfg;
+  };
 
   const hydrateFromPersisted = (cfg: PersistedConfig) => {
     setListenPort(cfg.listenPort);
     setGlobalKey(cfg.globalKey ?? "");
     setProxyUrl(cfg.proxyUrl ?? "");
+    const persistedFallback = typeof cfg.fallbackRetries === "number" ? cfg.fallbackRetries : 1;
+    setFallbackRetries(Math.max(0, Math.min(10, Math.floor(persistedFallback))));
     
     const svcList: ServiceConfig[] = cfg.services.map((svc) => ({
       id: svc.id,
@@ -151,12 +210,12 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    // Auto-save and hot-reload whenever configuration changes (debounced)
-    if (!hydrated) return;
+    // Auto hot-reload only when网关正在运行，且仅针对服务/路由变更
+    if (!hydrated || !isRunning) return;
 
     if (skipNextAutoReload.current) {
-      skipNextAutoReload.current = false;
-      return;
+        skipNextAutoReload.current = false;
+        return;
     }
 
     if (autoReloadTimer.current !== null) {
@@ -192,49 +251,34 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
         window.clearTimeout(autoReloadTimer.current);
       }
     };
-  }, [listenPort, globalKey, proxyUrl, services, upstreams, routes, hydrated]);
+  }, [services, upstreams, routes, hydrated, isRunning]);
+
+  useEffect(() => {
+    // Persist global/基础配置，但不触发自动启动/热更新
+    if (!hydrated) return;
+
+    if (autoSaveTimer.current !== null) {
+      window.clearTimeout(autoSaveTimer.current);
+    }
+
+    autoSaveTimer.current = window.setTimeout(() => {
+      const cfg = buildConfigPayload();
+      if (!cfg) return;
+      saveSettingsCmd(cfg).catch((err) => console.error(`自动保存配置失败：${String(err)}`));
+    }, 500);
+
+    return () => {
+      if (autoSaveTimer.current !== null) {
+        window.clearTimeout(autoSaveTimer.current);
+      }
+    };
+  }, [listenPort, globalKey, proxyUrl, fallbackRetries, services, upstreams, routes, hydrated]);
 
   const startGateway = async () => {
     setGlobalBusy(true);
+    const cfg = buildConfigPayload();
 
-    const payloadServices = services
-      .filter((s) => s.enabled)
-      .map((svc) => {
-        const serviceLinks = resequenceLinks(routes[svc.id] ?? []);
-        const upstreamEntries = serviceLinks
-          .filter((link) => link.enabled)
-          .map((link) => {
-            const upstream = upstreams.find((u) => u.id === link.upstreamId);
-            if (!upstream) return null;
-            return {
-              id: upstream.id,
-              label: upstream.label.trim() || null,
-              upstreamBase: upstream.upstreamBase.trim(),
-              apiKey: upstream.apiKey.trim() || null,
-              priority: link.priority,
-              enabled: upstream.enabled && link.enabled,
-            };
-          })
-          .filter((v) => v && v.upstreamBase) as {
-          id: string;
-          label: string | null;
-          upstreamBase: string;
-          apiKey: string | null;
-          priority: number;
-          enabled: boolean;
-        }[];
-
-        return {
-          id: svc.id,
-          name: svc.name.trim() || "未命名服务",
-          basePath: svc.basePath.trim() || "/",
-          enabled: svc.enabled,
-          upstreams: upstreamEntries,
-        };
-      })
-      .filter((svc) => (svc.upstreams?.length ?? 0) > 0);
-
-    if (payloadServices.length === 0) {
+    if (!cfg) {
       setGlobalBusy(false);
       setIsRunning(false);
       console.error("没有可用的服务或提供商配置");
@@ -242,13 +286,6 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const cfg: PersistedConfig = {
-        listenPort,
-        globalKey: globalKey.trim() || null,
-        proxyUrl: proxyUrl.trim() || null,
-        services: payloadServices,
-      };
-
       await saveSettingsCmd(cfg);
       await startProxy(cfg);
       await updateTrayStatus(true, listenPort, 0);
@@ -269,58 +306,15 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
     }
 
     setGlobalBusy(true);
+    const cfg = buildConfigPayload();
 
-    const payloadServices = services
-      .filter((s) => s.enabled)
-      .map((svc) => {
-        const serviceLinks = resequenceLinks(routes[svc.id] ?? []);
-        const upstreamEntries = serviceLinks
-          .filter((link) => link.enabled)
-          .map((link) => {
-            const upstream = upstreams.find((u) => u.id === link.upstreamId);
-            if (!upstream) return null;
-            return {
-              id: upstream.id,
-              label: upstream.label.trim() || null,
-              upstreamBase: upstream.upstreamBase.trim(),
-              apiKey: upstream.apiKey.trim() || null,
-              priority: link.priority,
-              enabled: upstream.enabled && link.enabled,
-            };
-          })
-          .filter((v) => v && v.upstreamBase) as {
-          id: string;
-          label: string | null;
-          upstreamBase: string;
-          apiKey: string | null;
-          priority: number;
-          enabled: boolean;
-        }[];
-
-        return {
-          id: svc.id,
-          name: svc.name.trim() || "未命名服务",
-          basePath: svc.basePath.trim() || "/",
-          enabled: svc.enabled,
-          upstreams: upstreamEntries,
-        };
-      })
-      .filter((svc) => (svc.upstreams?.length ?? 0) > 0);
-
-    if (payloadServices.length === 0) {
+    if (!cfg) {
       setGlobalBusy(false);
       console.error("没有可用的服务或提供商配置");
       return;
     }
 
     try {
-      const cfg: PersistedConfig = {
-        listenPort,
-        globalKey: globalKey.trim() || null,
-        proxyUrl: proxyUrl.trim() || null,
-        services: payloadServices,
-      };
-
       await saveSettingsCmd(cfg);
       await reloadProxy(cfg);
       await updateTrayStatus(true, listenPort, 0);
@@ -354,6 +348,8 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
         setGlobalKey,
         proxyUrl,
         setProxyUrl,
+        fallbackRetries,
+        setFallbackRetries,
         services,
         setServices,
         upstreams,

@@ -8,6 +8,7 @@ fn create_test_config() -> ProxyConfig {
         global_key: None,
         proxy_url: None,
         fallback_retries: 0,
+        all_upstreams: vec![],
         services: vec![
             ServiceConfig {
                 id: "svc1".into(),
@@ -71,6 +72,7 @@ fn select_service_prefers_longest_prefix() {
         global_key: None,
         proxy_url: None,
         fallback_retries: 0,
+        all_upstreams: vec![],
         services,
     };
 
@@ -175,6 +177,7 @@ fn resolve_route_orders_upstreams_for_fallback() {
         global_key: None,
         proxy_url: None,
         fallback_retries: 2,
+        all_upstreams: vec![],
         services: vec![ServiceConfig {
             id: "svc1".into(),
             name: "svc".into(),

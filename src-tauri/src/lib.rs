@@ -48,6 +48,8 @@ pub struct ProxyConfig {
     pub proxy_url: Option<String>,
     #[serde(default)]
     pub fallback_retries: u32,
+    #[serde(default)]
+    pub all_upstreams: Vec<UpstreamEntry>,
     pub services: Vec<ServiceConfig>,
 }
 
@@ -115,6 +117,20 @@ pub struct UpstreamStats {
     pub error_count: u64,
     #[ts(type = "number")]
     pub total_duration_ms: u64,
+}
+
+fn sanitize_upstream_entry(up: UpstreamEntry) -> UpstreamEntry {
+    UpstreamEntry {
+        id: up.id,
+        label: up
+            .label
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        upstream_base: up.upstream_base.trim().trim_end_matches('/').to_string(),
+        api_key: up.api_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        priority: up.priority,
+        enabled: up.enabled,
+    }
 }
 
 #[derive(Clone)]
@@ -190,17 +206,7 @@ async fn start_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> 
             upstreams: svc
                 .upstreams
                 .into_iter()
-                .map(|u| UpstreamEntry {
-                    id: u.id,
-                    label: u
-                        .label
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
-                    upstream_base: u.upstream_base.trim().trim_end_matches('/').to_string(),
-                    api_key: u.api_key.clone().filter(|s| !s.trim().is_empty()),
-                    priority: u.priority,
-                    enabled: u.enabled,
-                })
+                .map(sanitize_upstream_entry)
                 .filter(|u| !u.upstream_base.is_empty())
                 .collect(),
         })
@@ -216,6 +222,21 @@ async fn start_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> 
         svc.upstreams.sort_by_key(|u| u.priority);
     }
 
+    let mut upstream_map: HashMap<String, UpstreamEntry> = HashMap::new();
+    for up in config
+        .all_upstreams
+        .into_iter()
+        .map(sanitize_upstream_entry)
+    {
+        upstream_map.insert(up.id.clone(), up);
+    }
+    for svc in services.iter() {
+        for up in svc.upstreams.iter() {
+            upstream_map.entry(up.id.clone()).or_insert_with(|| up.clone());
+        }
+    }
+    let all_upstreams: Vec<UpstreamEntry> = upstream_map.into_values().collect();
+
     let proxy_url = config.proxy_url.clone().filter(|s| !s.trim().is_empty());
     let fallback_retries = config.fallback_retries.min(MAX_FALLBACK_RETRIES);
 
@@ -224,6 +245,7 @@ async fn start_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> 
         global_key: config.global_key.clone().filter(|s| !s.trim().is_empty()),
         proxy_url: proxy_url.clone(),
         fallback_retries,
+        all_upstreams,
         services,
     };
 
@@ -424,17 +446,7 @@ async fn reload_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) ->
             upstreams: svc
                 .upstreams
                 .into_iter()
-                .map(|u| UpstreamEntry {
-                    id: u.id,
-                    label: u
-                        .label
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
-                    upstream_base: u.upstream_base.trim().trim_end_matches('/').to_string(),
-                    api_key: u.api_key.clone().filter(|s| !s.trim().is_empty()),
-                    priority: u.priority,
-                    enabled: u.enabled,
-                })
+                .map(sanitize_upstream_entry)
                 .filter(|u| !u.upstream_base.is_empty())
                 .collect(),
         })
@@ -450,6 +462,21 @@ async fn reload_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) ->
         svc.upstreams.sort_by_key(|u| u.priority);
     }
 
+    let mut upstream_map: HashMap<String, UpstreamEntry> = HashMap::new();
+    for up in config
+        .all_upstreams
+        .into_iter()
+        .map(sanitize_upstream_entry)
+    {
+        upstream_map.insert(up.id.clone(), up);
+    }
+    for svc in services.iter() {
+        for up in svc.upstreams.iter() {
+            upstream_map.entry(up.id.clone()).or_insert_with(|| up.clone());
+        }
+    }
+    let all_upstreams: Vec<UpstreamEntry> = upstream_map.into_values().collect();
+
     let proxy_url = config.proxy_url.clone().filter(|s| !s.trim().is_empty());
     let new_client = build_client(proxy_url.as_deref())?;
 
@@ -463,6 +490,7 @@ async fn reload_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) ->
         global_key: config.global_key.clone().filter(|s| !s.trim().is_empty()),
         proxy_url: proxy_url.clone(),
         fallback_retries: config.fallback_retries.min(MAX_FALLBACK_RETRIES),
+        all_upstreams,
         services,
     };
 

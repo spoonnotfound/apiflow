@@ -84,7 +84,18 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
   const reloadGatewayRef = useRef<() => Promise<void>>(async () => {});
   const autoSaveTimer = useRef<number | null>(null);
 
-  const buildConfigPayload = () => {
+  const buildConfigPayload = (options?: { allowEmpty?: boolean }) => {
+    const allowEmpty = options?.allowEmpty ?? false;
+
+    const allUpstreams = upstreams.map((up) => ({
+      id: up.id,
+      label: up.label.trim() || null,
+      upstreamBase: up.upstreamBase.trim(),
+      apiKey: up.apiKey.trim() || null,
+      priority: 0,
+      enabled: up.enabled,
+    }));
+
     const payloadServices = services
       .filter((s) => s.enabled)
       .map((svc) => {
@@ -120,9 +131,9 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
           upstreams: upstreamEntries,
         };
       })
-      .filter((svc) => (svc.upstreams?.length ?? 0) > 0);
+      .filter((svc) => allowEmpty || (svc.upstreams?.length ?? 0) > 0);
 
-    if (payloadServices.length === 0) {
+    if (!allowEmpty && payloadServices.length === 0) {
       return null;
     }
 
@@ -131,6 +142,7 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
       globalKey: globalKey.trim() || null,
       proxyUrl: proxyUrl.trim() || null,
       fallbackRetries,
+      allUpstreams,
       services: payloadServices,
     };
 
@@ -162,17 +174,27 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
       routeMap[svc.id] = [];
     });
 
+    const addUpstreamToMap = (up: {
+      id: string;
+      label: string | null;
+      upstreamBase: string;
+      apiKey: string | null;
+      enabled: boolean;
+    }) => {
+      upstreamMap.set(up.id, {
+        id: up.id,
+        label: up.label || "未命名提供商",
+        upstreamBase: up.upstreamBase,
+        apiKey: up.apiKey || "",
+        enabled: up.enabled,
+      });
+    };
+
+    (cfg.allUpstreams ?? []).forEach(addUpstreamToMap);
+
     cfg.services.forEach((svc) => {
       svc.upstreams.forEach((up) => {
-        if (!upstreamMap.has(up.id)) {
-          upstreamMap.set(up.id, {
-            id: up.id,
-            label: up.label || "未命名提供商",
-            upstreamBase: up.upstreamBase,
-            apiKey: up.apiKey || "",
-            enabled: up.enabled,
-          });
-        }
+        addUpstreamToMap(up);
         routeMap[svc.id] = [
           ...(routeMap[svc.id] ?? []),
           {
@@ -262,7 +284,7 @@ export function ProxyStoreProvider({ children }: { children: ReactNode }) {
     }
 
     autoSaveTimer.current = window.setTimeout(() => {
-      const cfg = buildConfigPayload();
+      const cfg = buildConfigPayload({ allowEmpty: true });
       if (!cfg) return;
       saveSettingsCmd(cfg).catch((err) => console.error(`自动保存配置失败：${String(err)}`));
     }, 500);

@@ -63,7 +63,11 @@ fn complex_transform(lua: &Lua, ctx: &RequestContext) -> LuaResult<RequestContex
     lua.from_value(result)
 }
 
-fn precompiled_transform(lua: &Lua, transform_fn: &mlua::Function, ctx: &RequestContext) -> LuaResult<RequestContext> {
+fn precompiled_transform(
+    lua: &Lua,
+    transform_fn: &mlua::Function,
+    ctx: &RequestContext,
+) -> LuaResult<RequestContext> {
     let lua_ctx = lua.to_value(ctx)?;
     let result: mlua::Value = transform_fn.call(lua_ctx)?;
     lua.from_value(result)

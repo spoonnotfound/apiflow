@@ -6,7 +6,12 @@ use std::{
 };
 
 use axum::{
-    body::Body, extract::{ConnectInfo, State}, http::Request, http::StatusCode, response::Response, routing::any,
+    body::Body,
+    extract::{ConnectInfo, State},
+    http::Request,
+    http::StatusCode,
+    response::Response,
+    routing::any,
     Router,
 };
 use bytes::{Bytes, BytesMut};
@@ -15,9 +20,9 @@ use futures_util::StreamExt;
 use http::header;
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 use tauri::State as TauriState;
 use tokio::sync::{oneshot, Mutex, RwLock};
+use ts_rs::TS;
 use uuid::Uuid;
 
 mod helpers;
@@ -30,7 +35,8 @@ mod tray;
 mod tests;
 
 use crate::helpers::{
-    build_upstream_url, extract_proxy_key, format_headers, normalize_base_path, strip_base_path, truncate_body,
+    build_upstream_url, extract_proxy_key, format_headers, normalize_base_path, strip_base_path,
+    truncate_body,
 };
 use crate::logging::{finalize_inflight, MAX_LOGS};
 use crate::network::NetworkInfo;
@@ -38,6 +44,8 @@ use crate::persistence::{load_config, save_config};
 pub use tray::update_tray_status;
 
 const MAX_FALLBACK_RETRIES: u32 = 10;
+const LOG_BODY_LIMIT: usize = 512 * 1024; // 512KB for request/response snapshots
+const STREAM_LOG_BODY_LIMIT: usize = 1024 * 1024; // 1MB for aggregated streaming snapshot
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../src/types/generated/ProxyConfig.ts")]
@@ -127,7 +135,10 @@ fn sanitize_upstream_entry(up: UpstreamEntry) -> UpstreamEntry {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
         upstream_base: up.upstream_base.trim().trim_end_matches('/').to_string(),
-        api_key: up.api_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        api_key: up
+            .api_key
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         priority: up.priority,
         enabled: up.enabled,
     }
@@ -156,18 +167,18 @@ struct ProxyState {
 }
 
 fn build_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(600));
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(600));
 
     if let Some(url) = proxy_url {
         if !url.trim().is_empty() {
-            let proxy = reqwest::Proxy::all(url)
-                .map_err(|e| format!("代理配置无效: {e}"))?;
+            let proxy = reqwest::Proxy::all(url).map_err(|e| format!("代理配置无效: {e}"))?;
             builder = builder.proxy(proxy);
         }
     }
 
-    builder.build().map_err(|e| format!("创建HTTP客户端失败: {e}"))
+    builder
+        .build()
+        .map_err(|e| format!("创建HTTP客户端失败: {e}"))
 }
 
 impl ProxyState {
@@ -232,7 +243,9 @@ async fn start_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> 
     }
     for svc in services.iter() {
         for up in svc.upstreams.iter() {
-            upstream_map.entry(up.id.clone()).or_insert_with(|| up.clone());
+            upstream_map
+                .entry(up.id.clone())
+                .or_insert_with(|| up.clone());
         }
     }
     let all_upstreams: Vec<UpstreamEntry> = upstream_map.into_values().collect();
@@ -291,7 +304,11 @@ async fn start_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> 
         .fallback(any(proxy_handler))
         .with_state(shared);
 
-    let server = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async move {
+    let server = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
         let _ = shutdown_rx.await;
     });
 
@@ -399,12 +416,15 @@ async fn load_settings() -> Result<Option<ProxyConfig>, String> {
 }
 
 #[tauri::command]
-async fn save_settings(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> Result<(), String> {
+async fn save_settings(
+    config: ProxyConfig,
+    state: TauriState<'_, ProxyState>,
+) -> Result<(), String> {
     let mut config = config;
     config.fallback_retries = config.fallback_retries.min(MAX_FALLBACK_RETRIES);
 
     save_config(&config)?;
-    
+
     let guard = state.inner.lock().await;
     if let Some(server) = guard.get(&config.listen_port) {
         let mut cfg_guard = server.config.write().await;
@@ -418,7 +438,10 @@ async fn save_settings(config: ProxyConfig, state: TauriState<'_, ProxyState>) -
 }
 
 #[tauri::command]
-async fn reload_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) -> Result<(), String> {
+async fn reload_proxy(
+    config: ProxyConfig,
+    state: TauriState<'_, ProxyState>,
+) -> Result<(), String> {
     // 不允许热切换端口
     {
         let guard = state.config.read().await;
@@ -472,7 +495,9 @@ async fn reload_proxy(config: ProxyConfig, state: TauriState<'_, ProxyState>) ->
     }
     for svc in services.iter() {
         for up in svc.upstreams.iter() {
-            upstream_map.entry(up.id.clone()).or_insert_with(|| up.clone());
+            upstream_map
+                .entry(up.id.clone())
+                .or_insert_with(|| up.clone());
         }
     }
     let all_upstreams: Vec<UpstreamEntry> = upstream_map.into_values().collect();
@@ -576,12 +601,8 @@ async fn proxy_handler(
         duration_ms: 0,
         error: None,
         listen_port: config.listen_port,
-        route_key: upstreams
-            .first()
-            .and_then(|u| u.upstream_label.clone()),
-        upstream_label: upstreams
-            .first()
-            .and_then(|u| u.upstream_label.clone()),
+        route_key: upstreams.first().and_then(|u| u.upstream_label.clone()),
+        upstream_label: upstreams.first().and_then(|u| u.upstream_label.clone()),
         service_name: Some(service_name),
         base_path: Some(service_base),
         retry_action: None,
@@ -604,7 +625,11 @@ async fn proxy_handler(
         }
     };
 
-    entry.request_body = truncate_body(&body_bytes, 8000);
+    let req_content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    entry.request_body = truncate_body(&body_bytes, LOG_BODY_LIMIT, req_content_type);
 
     let allowed_retries = config.fallback_retries.min(MAX_FALLBACK_RETRIES);
     let retries_per_upstream = allowed_retries.saturating_sub(1); // 0->no retry,1->no retry but allow fallback,2->retry once then fallback
@@ -682,14 +707,14 @@ async fn proxy_handler(
                     .await;
                 }
                 Err(err) => {
-                logging::update_stats(
-                    shared.stats.clone(),
-                    &upstream.upstream_id,
-                    upstream.upstream_label.clone(),
-                    attempt_started.elapsed().as_millis() as u64,
-                    false,
-                )
-                .await;
+                    logging::update_stats(
+                        shared.stats.clone(),
+                        &upstream.upstream_id,
+                        upstream.upstream_label.clone(),
+                        attempt_started.elapsed().as_millis() as u64,
+                        false,
+                    )
+                    .await;
 
                     let mut failed_entry = entry.clone();
                     failed_entry.id = format!("{}-{}-{}", entry.id, up_idx + 1, attempt + 1);
@@ -709,23 +734,20 @@ async fn proxy_handler(
                     } else {
                         None
                     };
-                logging::upsert_log(shared.logs.clone(), failed_entry).await;
-                attempt_errors.push(err.to_string());
+                    logging::upsert_log(shared.logs.clone(), failed_entry).await;
+                    attempt_errors.push(err.to_string());
 
-                if has_retry_left {
-                    continue;
-                }
+                    if has_retry_left {
+                        continue;
+                    }
 
-                // Exhausted retries for this upstream; try next if available
-                if allow_fallback && up_idx + 1 < upstreams.len() {
-                    break; // move to next upstream
-                }
+                    // Exhausted retries for this upstream; try next if available
+                    if allow_fallback && up_idx + 1 < upstreams.len() {
+                        break; // move to next upstream
+                    }
 
                     // No upstreams left
-                    entry.error = Some(format!(
-                        "上游请求失败: {}",
-                        attempt_errors.join("; ")
-                    ));
+                    entry.error = Some(format!("上游请求失败: {}", attempt_errors.join("; ")));
                     entry.status = Some(StatusCode::BAD_GATEWAY.as_u16());
                     entry.duration_ms = started_at.elapsed().as_millis();
                     logging::upsert_log(shared.logs.clone(), entry).await;
@@ -743,7 +765,10 @@ async fn proxy_handler(
 
 // --- Helper Functions ---
 
-fn check_auth(config: &ProxyConfig, parts: &http::request::Parts) -> Result<(), (StatusCode, &'static str)> {
+fn check_auth(
+    config: &ProxyConfig,
+    parts: &http::request::Parts,
+) -> Result<(), (StatusCode, &'static str)> {
     let provided_key = extract_proxy_key(parts);
     if let Some(global_key) = &config.global_key {
         if provided_key.as_deref() != Some(global_key.as_str()) {
@@ -842,7 +867,10 @@ fn prepare_upstream_request(
             continue;
         }
         builder = builder.header(name.clone(), value.clone());
-        upstream_headers.push((name.to_string(), value.to_str().unwrap_or("<binary>").to_string()));
+        upstream_headers.push((
+            name.to_string(),
+            value.to_str().unwrap_or("<binary>").to_string(),
+        ));
     }
 
     // 优先使用配置的上游 key，否则回填客户端提供的 auth
@@ -859,11 +887,17 @@ fn prepare_upstream_request(
         None => {
             if let Some(v) = client_goog_key.clone() {
                 builder = builder.header("x-goog-api-key", v.clone());
-                upstream_headers.push(("x-goog-api-key".to_string(), v.to_str().unwrap_or("<binary>").to_string()));
+                upstream_headers.push((
+                    "x-goog-api-key".to_string(),
+                    v.to_str().unwrap_or("<binary>").to_string(),
+                ));
             }
             if let Some(v) = client_auth_header.clone() {
                 builder = builder.header(header::AUTHORIZATION, v.clone());
-                upstream_headers.push(("authorization".to_string(), v.to_str().unwrap_or("<binary>").to_string()));
+                upstream_headers.push((
+                    "authorization".to_string(),
+                    v.to_str().unwrap_or("<binary>").to_string(),
+                ));
             }
         }
     }
@@ -891,12 +925,13 @@ async fn handle_upstream_response(
     entry.status = Some(status.as_u16());
 
     let headers = resp.headers().clone();
-    entry.response_headers = Some(format_headers(&headers));
-
-    let content_type = headers
+    let content_type_header = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .map(|v| v.to_string());
+    entry.response_headers = Some(format_headers(&headers));
+
+    let content_type = content_type_header.as_deref().unwrap_or("");
 
     let is_streaming = content_type.contains("text/event-stream")
         || content_type.contains("application/x-ndjson")
@@ -915,6 +950,7 @@ async fn handle_upstream_response(
             upstream_id,
             upstream_label,
             status,
+            content_type_header.clone(),
             headers,
         )
     } else {
@@ -928,6 +964,7 @@ async fn handle_upstream_response(
             upstream_id,
             upstream_label,
             status,
+            content_type_header.as_deref(),
             headers,
         )
         .await
@@ -944,13 +981,14 @@ fn handle_streaming_body(
     upstream_id: String,
     upstream_label: Option<String>,
     status: StatusCode,
+    content_type: Option<String>,
     headers: header::HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
     let mut byte_stream = resp.bytes_stream();
 
     let entry_clone = entry.clone();
-    
+
     tokio::spawn(async move {
         let mut collected = BytesMut::new();
 
@@ -963,7 +1001,10 @@ fn handle_streaming_body(
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                    let _ = tx.send(Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    )));
                     break;
                 }
             }
@@ -972,7 +1013,7 @@ fn handle_streaming_body(
         let response_body = if collected.is_empty() {
             Some("[流式响应]".to_string())
         } else {
-            truncate_body(&collected, 64000)
+            truncate_body(&collected, STREAM_LOG_BODY_LIMIT, content_type.as_deref())
         };
 
         let mut final_entry = entry_clone;
@@ -1005,6 +1046,7 @@ async fn handle_regular_body(
     upstream_id: String,
     upstream_label: Option<String>,
     status: StatusCode,
+    content_type: Option<&str>,
     headers: header::HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
     let body_bytes = match resp.bytes().await {
@@ -1018,7 +1060,7 @@ async fn handle_regular_body(
     };
 
     entry.duration_ms = request_started.elapsed().as_millis();
-    entry.response_body = truncate_body(&body_bytes, 8000);
+    entry.response_body = truncate_body(&body_bytes, LOG_BODY_LIMIT, content_type);
 
     if status.is_client_error() || status.is_server_error() {
         let text = String::from_utf8_lossy(&body_bytes);
@@ -1050,12 +1092,15 @@ fn build_response(
         if name == header::TRANSFER_ENCODING
             || name == header::CONTENT_LENGTH
             || name == header::CONNECTION
+            || name == header::CONTENT_ENCODING
         {
             continue;
         }
         builder = builder.header(name, value);
     }
-    builder.body(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    builder
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]
@@ -1087,8 +1132,6 @@ fn select_service<'a>(config: &'a ProxyConfig, path: &str) -> Option<&'a Service
     candidates.sort_by_key(|svc| std::cmp::Reverse(svc.base_path.len()));
     candidates.into_iter().next()
 }
-
-
 
 fn error_response(status: StatusCode, msg: &str) -> Response<Body> {
     let payload = serde_json::json!({ "error": msg }).to_string();

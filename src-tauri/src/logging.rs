@@ -27,11 +27,13 @@ pub async fn update_stats(
     success: bool,
 ) {
     let mut guard = stats.lock().await;
-    let entry = guard.entry(upstream_id.to_string()).or_insert_with(|| UpstreamStats {
-        upstream_id: upstream_id.to_string(),
-        upstream_label: upstream_label.clone(),
-        ..Default::default()
-    });
+    let entry = guard
+        .entry(upstream_id.to_string())
+        .or_insert_with(|| UpstreamStats {
+            upstream_id: upstream_id.to_string(),
+            upstream_label: upstream_label.clone(),
+            ..Default::default()
+        });
     entry.total_requests += 1;
     entry.total_duration_ms += duration_ms;
     if success {
@@ -51,9 +53,7 @@ pub async fn finalize_inflight(
 ) {
     let mut guard = logs.lock().await;
     for entry in guard.iter_mut() {
-        let port_matches = listen_port
-            .map(|p| p == entry.listen_port)
-            .unwrap_or(true);
+        let port_matches = listen_port.map(|p| p == entry.listen_port).unwrap_or(true);
 
         if port_matches && entry.status.is_none() {
             entry.status = Some(499); // Client Closed Request semantics

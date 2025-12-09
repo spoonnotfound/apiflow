@@ -1,6 +1,6 @@
 use super::*;
+use crate::helpers::{build_upstream_url, normalize_base_path, strip_base_path, truncate_body};
 use crate::{ProxyConfig, ServiceConfig, UpstreamEntry};
-use crate::helpers::{build_upstream_url, normalize_base_path, strip_base_path};
 
 fn create_test_config() -> ProxyConfig {
     ProxyConfig {
@@ -9,24 +9,20 @@ fn create_test_config() -> ProxyConfig {
         proxy_url: None,
         fallback_retries: 0,
         all_upstreams: vec![],
-        services: vec![
-            ServiceConfig {
-                id: "svc1".into(),
-                name: "Test Service".into(),
-                base_path: "/api".into(),
+        services: vec![ServiceConfig {
+            id: "svc1".into(),
+            name: "Test Service".into(),
+            base_path: "/api".into(),
+            enabled: true,
+            upstreams: vec![UpstreamEntry {
+                id: "up1".into(),
+                label: Some("Upstream 1".into()),
+                upstream_base: "http://localhost:9999".into(),
+                api_key: None,
+                priority: 1,
                 enabled: true,
-                upstreams: vec![
-                    UpstreamEntry {
-                        id: "up1".into(),
-                        label: Some("Upstream 1".into()),
-                        upstream_base: "http://localhost:9999".into(),
-                        api_key: None,
-                        priority: 1,
-                        enabled: true,
-                    }
-                ],
-            }
-        ],
+            }],
+        }],
     }
 }
 
@@ -45,8 +41,14 @@ fn strip_base_path_removes_prefix() {
 
 #[test]
 fn build_upstream_url_respects_separators() {
-    assert_eq!(build_upstream_url("https://a.com", "/v1"), "https://a.com/v1");
-    assert_eq!(build_upstream_url("https://a.com/", "v1"), "https://a.com/v1");
+    assert_eq!(
+        build_upstream_url("https://a.com", "/v1"),
+        "https://a.com/v1"
+    );
+    assert_eq!(
+        build_upstream_url("https://a.com/", "v1"),
+        "https://a.com/v1"
+    );
 }
 
 #[test]
@@ -98,20 +100,20 @@ fn select_upstream_respects_priority_and_enabled() {
             api_key: None,
             priority: 1,
             enabled: false,
-            },
-            UpstreamEntry {
-                id: "c".into(),
-                label: None,
-                upstream_base: "http://c".into(),
-                api_key: None,
-                priority: 2,
-                enabled: true,
-            },
-        ];
+        },
+        UpstreamEntry {
+            id: "c".into(),
+            label: None,
+            upstream_base: "http://c".into(),
+            api_key: None,
+            priority: 2,
+            enabled: true,
+        },
+    ];
 
-        let chosen = select_upstream(&upstreams).expect("upstream");
-        assert_eq!(chosen.id, "c");
-    }
+    let chosen = select_upstream(&upstreams).expect("upstream");
+    assert_eq!(chosen.id, "c");
+}
 
 #[test]
 fn test_check_auth_no_key() {
@@ -122,7 +124,7 @@ fn test_check_auth_no_key() {
         .unwrap()
         .into_parts()
         .0;
-    
+
     assert!(check_auth(&config, &parts).is_ok());
 }
 
@@ -138,7 +140,7 @@ fn test_check_auth_with_global_key_success() {
         .unwrap()
         .into_parts()
         .0;
-    
+
     assert!(check_auth(&config, &parts).is_ok());
 }
 
@@ -154,7 +156,7 @@ fn test_check_auth_with_global_key_failure() {
         .unwrap()
         .into_parts()
         .0;
-    
+
     assert!(check_auth(&config, &parts).is_err());
 }
 
@@ -162,7 +164,7 @@ fn test_check_auth_with_global_key_failure() {
 fn test_resolve_route_success() {
     let config = create_test_config();
     let route = resolve_route(&config, "/api/users/1");
-    
+
     assert!(route.is_some());
     let r = route.unwrap();
     assert_eq!(r.service_name, "Test Service");
@@ -213,8 +215,28 @@ fn resolve_route_orders_upstreams_for_fallback() {
     };
 
     let route = resolve_route(&config, "/any").expect("route");
-    let ids: Vec<_> = route.upstreams.iter().map(|u| u.upstream_id.as_str()).collect();
+    let ids: Vec<_> = route
+        .upstreams
+        .iter()
+        .map(|u| u.upstream_id.as_str())
+        .collect();
     assert_eq!(ids, vec!["u2", "u1"]);
+}
+
+#[test]
+fn truncate_body_honors_charset_and_truncation() {
+    let (encoded, _, _) = encoding_rs::GBK.encode("你好，世界");
+    let decoded = truncate_body(&encoded, 6, Some("text/plain; charset=gbk")).expect("body");
+    assert!(decoded.contains("你好"));
+    assert!(decoded.contains("内容已截断"));
+}
+
+#[test]
+fn truncate_body_hides_binary_payload() {
+    let binary = [0_u8, 159, 146, 150, 10];
+    let preview =
+        truncate_body(&binary, 10, Some("application/octet-stream")).expect("body preview");
+    assert!(preview.contains("非文本内容"));
 }
 
 #[test]
@@ -229,7 +251,7 @@ async fn test_prepare_upstream_request() {
     let client = reqwest::Client::new();
     let method = http::Method::POST;
     let url = "http://example.com/v1/chat";
-    
+
     let mut headers = http::HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
     headers.insert("x-custom", "foo".parse().unwrap());
@@ -240,25 +262,27 @@ async fn test_prepare_upstream_request() {
     let api_key = Some("new-key");
     let body = Bytes::from("test body");
 
-    let (req_builder, _headers_str) = prepare_upstream_request(
-        &client,
-        &method,
-        url,
-        &headers,
-        api_key,
-        body
-    );
+    let (req_builder, _headers_str) =
+        prepare_upstream_request(&client, &method, url, &headers, api_key, body);
     let req = req_builder.build().unwrap();
 
     assert_eq!(req.method(), http::Method::POST);
     assert_eq!(req.url().as_str(), "http://example.com/v1/chat");
-    
+
     // Check headers
-    assert_eq!(req.headers().get("content-type").unwrap(), "application/json");
+    assert_eq!(
+        req.headers().get("content-type").unwrap(),
+        "application/json"
+    );
     assert_eq!(req.headers().get("x-custom").unwrap(), "foo");
     assert!(req.headers().get("host").is_none()); // filtered
-    
+
     // Check auth replacement
-    let auth = req.headers().get("authorization").unwrap().to_str().unwrap();
+    let auth = req
+        .headers()
+        .get("authorization")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(auth, "Bearer new-key");
 }

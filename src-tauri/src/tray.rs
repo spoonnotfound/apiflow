@@ -70,7 +70,8 @@ pub fn update_tray_status(
         } else {
             "ApiFlow - 已停止".to_string()
         };
-        tray.set_tooltip(Some(&tooltip)).map_err(|e| e.to_string())?;
+        tray.set_tooltip(Some(&tooltip))
+            .map_err(|e| e.to_string())?;
 
         let status_text = if running {
             if active_processing > 0 {
@@ -84,8 +85,8 @@ pub fn update_tray_status(
 
         let status_item = MenuItem::with_id(&app, "status", &status_text, false, None::<&str>)
             .map_err(|e| e.to_string())?;
-        let separator = tauri::menu::PredefinedMenuItem::separator(&app)
-            .map_err(|e| e.to_string())?;
+        let separator =
+            tauri::menu::PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
         let show_item = MenuItem::with_id(&app, "show", "显示窗口", true, None::<&str>)
             .map_err(|e| e.to_string())?;
         let quit_item = MenuItem::with_id(&app, "quit", "退出", true, None::<&str>)

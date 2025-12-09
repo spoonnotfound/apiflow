@@ -636,7 +636,7 @@ async fn proxy_handler(
     let allow_fallback = allowed_retries >= 1;
     let mut attempt_errors: Vec<String> = Vec::new();
 
-    for (up_idx, upstream) in upstreams.iter().enumerate() {
+    'upstreams: for (up_idx, upstream) in upstreams.iter().enumerate() {
         for attempt in 0..=retries_per_upstream {
             let attempt_started = Instant::now();
 
@@ -668,24 +668,50 @@ async fn proxy_handler(
             match upstream_resp {
                 Ok(resp) => {
                     let status = resp.status();
-                    if should_retry_status(status) && attempt < retries_per_upstream {
-                        let mut failed_entry = entry.clone();
-                        failed_entry.id = format!("{}-{}-{}", entry.id, up_idx + 1, attempt + 1);
-                        failed_entry.status = Some(status.as_u16());
-                        failed_entry.duration_ms = attempt_started.elapsed().as_millis();
-                        failed_entry.error = Some(format!("上游返回 {status}，已自动重试"));
-                        failed_entry.retry_action = Some("retry".into());
-                        logging::upsert_log(shared.logs.clone(), failed_entry).await;
-                        logging::update_stats(
-                            shared.stats.clone(),
-                            &upstream.upstream_id,
-                            upstream.upstream_label.clone(),
-                            attempt_started.elapsed().as_millis() as u64,
-                            false,
-                        )
-                        .await;
-                        attempt_errors.push(format!("上游返回 {status}"));
-                        continue;
+                    let has_retry_left = attempt < retries_per_upstream;
+                    let has_next_upstream = allow_fallback && up_idx + 1 < upstreams.len();
+
+                    if should_retry_status(status) {
+                        if has_retry_left {
+                            let mut failed_entry = entry.clone();
+                            failed_entry.id =
+                                format!("{}-{}-{}", entry.id, up_idx + 1, attempt + 1);
+                            failed_entry.status = Some(status.as_u16());
+                            failed_entry.duration_ms = attempt_started.elapsed().as_millis();
+                            failed_entry.error = Some(format!("上游返回 {status}，已自动重试"));
+                            failed_entry.retry_action = Some("retry".into());
+                            logging::upsert_log(shared.logs.clone(), failed_entry).await;
+                            logging::update_stats(
+                                shared.stats.clone(),
+                                &upstream.upstream_id,
+                                upstream.upstream_label.clone(),
+                                attempt_started.elapsed().as_millis() as u64,
+                                false,
+                            )
+                            .await;
+                            attempt_errors.push(format!("上游返回 {status}"));
+                            continue;
+                        }
+
+                        if has_next_upstream {
+                            let mut failed_entry = entry.clone();
+                            failed_entry.id =
+                                format!("{}-{}-{}", entry.id, up_idx + 1, attempt + 1);
+                            failed_entry.status = Some(status.as_u16());
+                            failed_entry.duration_ms = attempt_started.elapsed().as_millis();
+                            failed_entry.error = Some(format!("上游返回 {status}，已自动切换上游"));
+                            failed_entry.retry_action = Some("fallback".into());
+                            logging::upsert_log(shared.logs.clone(), failed_entry).await;
+                            logging::update_stats(
+                                shared.stats.clone(),
+                                &upstream.upstream_id,
+                                upstream.upstream_label.clone(),
+                                attempt_started.elapsed().as_millis() as u64,
+                                false,
+                            )
+                            .await;
+                            continue 'upstreams; // move to next upstream
+                        }
                     }
 
                     if up_idx > 0 {

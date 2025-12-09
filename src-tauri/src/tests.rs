@@ -286,3 +286,27 @@ async fn test_prepare_upstream_request() {
         .unwrap();
     assert_eq!(auth, "Bearer new-key");
 }
+
+#[tokio::test]
+async fn test_prepare_upstream_request_drops_client_auth_when_no_api_key() {
+    let client = reqwest::Client::new();
+    let method = http::Method::GET;
+    let url = "http://example.com/v1/models";
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert("authorization", "Bearer user-key".parse().unwrap());
+    headers.insert("x-goog-api-key", "user-goog-key".parse().unwrap());
+    headers.insert("accept", "application/json".parse().unwrap());
+
+    let body = Bytes::from_static(b"");
+
+    let (req_builder, headers_str) =
+        prepare_upstream_request(&client, &method, url, &headers, None, body);
+    let req = req_builder.build().unwrap();
+
+    assert!(req.headers().get("authorization").is_none());
+    assert!(req.headers().get("x-goog-api-key").is_none());
+    assert_eq!(req.headers().get("accept").unwrap(), "application/json");
+    assert!(!headers_str.contains("authorization"));
+    assert!(!headers_str.contains("x-goog-api-key"));
+}

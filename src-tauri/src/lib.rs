@@ -843,9 +843,6 @@ fn prepare_upstream_request(
     let mut builder = client.request(method.clone(), url);
     let mut upstream_headers: Vec<(String, String)> = Vec::new();
 
-    // Detect which auth header the client is using to pass it through correctly or adapt it
-    let mut client_auth_header: Option<header::HeaderValue> = None;
-    let mut client_goog_key: Option<header::HeaderValue> = None;
     let uses_goog_api_key = headers
         .keys()
         .any(|name| name.as_str().eq_ignore_ascii_case("x-goog-api-key"));
@@ -854,13 +851,11 @@ fn prepare_upstream_request(
         if name == header::HOST || name == header::CONTENT_LENGTH {
             continue;
         }
-        // Auth header处理：记录原值，稍后根据配置决定覆盖或回填
+        // 不透传客户端认证头，避免用户 key 被当作上游 key 使用
         if name == header::AUTHORIZATION {
-            client_auth_header = Some(value.clone());
             continue;
         }
         if name.as_str().eq_ignore_ascii_case("x-goog-api-key") {
-            client_goog_key = Some(value.clone());
             continue;
         }
         if name.as_str().eq_ignore_ascii_case("x-proxy-key") {
@@ -873,7 +868,7 @@ fn prepare_upstream_request(
         ));
     }
 
-    // 优先使用配置的上游 key，否则回填客户端提供的 auth
+    // 只使用配置的上游 key，不回填客户端提供的 auth
     match api_key {
         Some(key) => {
             if uses_goog_api_key {
@@ -884,22 +879,7 @@ fn prepare_upstream_request(
                 upstream_headers.push(("authorization".to_string(), format!("Bearer {}", key)));
             }
         }
-        None => {
-            if let Some(v) = client_goog_key.clone() {
-                builder = builder.header("x-goog-api-key", v.clone());
-                upstream_headers.push((
-                    "x-goog-api-key".to_string(),
-                    v.to_str().unwrap_or("<binary>").to_string(),
-                ));
-            }
-            if let Some(v) = client_auth_header.clone() {
-                builder = builder.header(header::AUTHORIZATION, v.clone());
-                upstream_headers.push((
-                    "authorization".to_string(),
-                    v.to_str().unwrap_or("<binary>").to_string(),
-                ));
-            }
-        }
+        None => {}
     }
 
     let headers_str = upstream_headers
